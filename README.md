@@ -1,24 +1,22 @@
-# WeatherEdge
+# WeatherEdge Dark v2.2
 
-A Streamlit dashboard that compares Kalshi weather markets with NWS forecasts and ensemble weather data.
+This is the unmistakable dark build of WeatherEdge.
 
-## Run locally
-
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
-
-## Deploy on Streamlit Community Cloud
-
-Create a GitHub repository and put these three files in the repository root:
-
-- `app.py`
+## Files
+- `weatheredge_dark.py`
 - `requirements.txt`
 - `README.md`
 
-Then create a Streamlit app from that repository and set the main file path to `app.py`.
+## Streamlit Community Cloud deployment
+Set **Main file path** to:
 
-### Visual check
+`weatheredge_dark.py`
 
-The current build is the dark WeatherEdge redesign. When it is running correctly, the page has a dark background, green accents, and a `WEATHEREDGE v2.1.0` badge near the top.
+When the correct build is running, you will immediately see:
+- a dark navy/black interface
+- green accents
+- the badge `WEATHEREDGE v2.2 • LIVE NWS HIGH • DARK BUILD`
+
+The NWS temperature displayed is the current official NWS predicted daytime high for that date at the configured settlement-area point. The NWS button opens the human-readable forecast.weather.gov page for the same latitude/longitude.
+
+Research tool only. Forecasts and market prices can change.
