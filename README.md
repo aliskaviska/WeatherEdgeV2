@@ -1,22 +1,22 @@
-# WeatherEdge Dark v2.2
+# WeatherEdge v2.3
 
-This is the unmistakable dark build of WeatherEdge.
+Fresh Streamlit deployment package.
 
-## Files
-- `weatheredge_dark.py`
-- `requirements.txt`
-- `README.md`
+## Deploy
+Upload all three files to the root of a new GitHub repository.
 
-## Streamlit Community Cloud deployment
-Set **Main file path** to:
+In Streamlit Community Cloud use:
 
-`weatheredge_dark.py`
+- Branch: `main`
+- Main file path: `weatheredge_v23.py`
 
-When the correct build is running, you will immediately see:
-- a dark navy/black interface
-- green accents
-- the badge `WEATHEREDGE v2.2 • LIVE NWS HIGH • DARK BUILD`
+## Visual check
+The correct build is dark and shows this badge at the top:
 
-The NWS temperature displayed is the current official NWS predicted daytime high for that date at the configured settlement-area point. The NWS button opens the human-readable forecast.weather.gov page for the same latitude/longitude.
+`WEATHEREDGE v2.3 • NWS LIVE HIGH`
 
-Research tool only. Forecasts and market prices can change.
+Each candidate card has a bright green button near the top:
+
+`Open official NWS hourly forecast ↗`
+
+The displayed NWS Predicted High is calculated from the maximum temperature in the latest NWS hourly forecast for that calendar day.
