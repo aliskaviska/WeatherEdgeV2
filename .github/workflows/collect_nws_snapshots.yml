@@ -1,4 +1,4 @@
-name: Collect NWS forecast snapshots
+name: WeatherEdge NWS forecast snapshots
 
 on:
 
