@@ -1,12 +1,12 @@
-name: WeatherEdge NWS forecast snapshots
+name: WeatherEdge NWS snapshot collector
 
 on:
+
+  workflow_dispatch:
 
   schedule:
 
     - cron: "7,37 * * * *"
-
-  workflow_dispatch:
 
 jobs:
 
