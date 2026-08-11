@@ -6,7 +6,7 @@ name: WeatherEdge NWS snapshot collector
 
   schedule:
 
-    - cron: "11 41 * * * *"
+    - cron: "11, 41 * * * *"
 
 jobs:
 
