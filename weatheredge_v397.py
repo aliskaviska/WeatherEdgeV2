@@ -608,175 +608,6 @@ def build_nws_error_calibration(city, station_id, tz_name):
     return calibration
 
 
-
-def _clamp01(x):
-    try:
-        return max(0.0, min(1.0, float(x)))
-    except Exception:
-        return 0.0
-
-
-def trajectory_agreement_score(city, cfg, contract_date, nws_high):
-    """
-    Score recent observed-vs-NWS trajectory agreement from 0 to 1.
-
-    Uses the latest stored NWS projection for hours that have already occurred
-    today and compares it with observed station temperatures at nearby times.
-    Returns a neutral 0.5 when there is not enough overlapping data.
-    """
-    try:
-        rows, err = get_snapshot_rows(city, contract_date)
-        if err or not rows:
-            return 0.5
-        snap, norm_err = normalize_snapshot_rows(rows)
-        if norm_err or snap.empty:
-            return 0.5
-
-        obs = get_station_observations(cfg.get("station_id"), cfg["tz"], contract_date)
-        if obs is None or obs.empty:
-            return 0.5
-
-        tz = ZoneInfo(cfg["tz"])
-        now_local = pd.Timestamp.now(tz=tz)
-        latest_key = snap["snapshot_key"].max()
-        fc = snap[snap["snapshot_key"] == latest_key].copy()
-        fc["time_local"] = fc["valid_at"].dt.tz_convert(tz)
-        fc = fc[
-            (fc["time_local"].dt.date == contract_date)
-            & (fc["time_local"] <= now_local)
-        ][["time_local", "temp_f"]].dropna().sort_values("time_local")
-        if fc.empty:
-            return 0.5
-
-        ob = obs.copy()
-        ob["time_local"] = pd.to_datetime(ob["time"], utc=True, errors="coerce").dt.tz_convert(tz)
-        ob = ob[
-            (ob["time_local"].dt.date == contract_date)
-            & (ob["time_local"] <= now_local)
-        ][["time_local", "temp_f"]].dropna().sort_values("time_local")
-        if ob.empty:
-            return 0.5
-
-        # Match each forecast point to nearest observation within 75 minutes.
-        merged = pd.merge_asof(
-            fc.sort_values("time_local"),
-            ob.sort_values("time_local"),
-            on="time_local",
-            direction="nearest",
-            tolerance=pd.Timedelta(minutes=75),
-            suffixes=("_fc", "_obs"),
-        ).dropna(subset=["temp_f_fc", "temp_f_obs"])
-
-        if len(merged) < 2:
-            return 0.5
-
-        mae = float((merged["temp_f_obs"] - merged["temp_f_fc"]).abs().mean())
-
-        # <=0.5°F is excellent; >=4°F is poor.
-        mae_component = _clamp01(1.0 - (mae - 0.5) / 3.5)
-
-        # Compare recent directional trend where possible.
-        if len(merged) >= 3:
-            fc_delta = float(merged["temp_f_fc"].iloc[-1] - merged["temp_f_fc"].iloc[-3])
-            obs_delta = float(merged["temp_f_obs"].iloc[-1] - merged["temp_f_obs"].iloc[-3])
-            if abs(fc_delta) < 0.4 and abs(obs_delta) < 0.4:
-                trend_component = 1.0
-            elif fc_delta == 0 or obs_delta == 0:
-                trend_component = 0.7
-            else:
-                trend_component = 1.0 if (fc_delta > 0) == (obs_delta > 0) else 0.25
-        else:
-            trend_component = 0.6
-
-        return _clamp01(0.75 * mae_component + 0.25 * trend_component)
-    except Exception:
-        return 0.5
-
-
-def bet_quality_score(edge, p_nws, hours_left, temp_gap, trajectory_score,
-                      sigma_source=None, sigma_samples=0):
-    """
-    0-100 composite ranking score.
-
-    Weights:
-      40% market edge
-      20% NWS confidence
-      15% observed/NWS trajectory agreement
-      10% time to settlement
-      10% NWS-vs-Kalshi temperature mismatch
-       5% secondary pricing mismatch
-
-    Includes penalties for weak calibration and contradictory recent observations.
-    """
-    # Market edge: full credit at +30 pp, zero at <=0.
-    edge_component = _clamp01((edge or 0.0) / 0.30)
-
-    # NWS confidence: 55% starts earning credit; 90%+ is full credit.
-    confidence_component = _clamp01(((p_nws or 0.0) - 0.55) / 0.35)
-
-    # Observation / NWS trajectory agreement already 0..1.
-    trajectory_component = _clamp01(trajectory_score)
-
-    # Time: closer settlement is more informative, but not an automatic win.
-    if hours_left is None:
-        time_component = 0.35
-    elif hours_left <= 3:
-        time_component = 1.0
-    elif hours_left <= 6:
-        time_component = 0.9
-    elif hours_left <= 12:
-        time_component = 0.78
-    elif hours_left <= 24:
-        time_component = 0.62
-    elif hours_left <= 48:
-        time_component = 0.42
-    elif hours_left <= 72:
-        time_component = 0.28
-    else:
-        time_component = 0.15
-
-    # Temperature mismatch: 0°F = none, 4°F+ = full credit.
-    temp_component = _clamp01(abs(temp_gap or 0.0) / 4.0)
-
-    # Small secondary pricing term to avoid double-counting edge too strongly.
-    pricing_component = _clamp01((edge or 0.0) / 0.20)
-
-    raw = 100.0 * (
-        0.40 * edge_component
-        + 0.20 * confidence_component
-        + 0.15 * trajectory_component
-        + 0.10 * time_component
-        + 0.10 * temp_component
-        + 0.05 * pricing_component
-    )
-
-    # Penalty if empirical NWS error calibration is not ready yet.
-    if sigma_source != "historical":
-        raw -= 5.0
-    elif sigma_samples is not None and sigma_samples < 15:
-        raw -= 2.0
-
-    # Strong disagreement between observations and NWS trajectory.
-    if trajectory_component < 0.30:
-        raw -= 12.0
-    elif trajectory_component < 0.50:
-        raw -= 5.0
-
-    return max(0.0, min(100.0, raw))
-
-
-def bet_quality_label(score):
-    if score >= 85:
-        return "EXCELLENT"
-    if score >= 75:
-        return "STRONG"
-    if score >= 65:
-        return "GOOD"
-    if score >= 55:
-        return "WATCH"
-    return "WEAK"
-
-
 def build_city_rows(city, cfg):
     calibration = build_nws_error_calibration(
         city, cfg.get("station_id"), cfg["tz"]
@@ -819,8 +650,6 @@ def build_city_rows(city, cfg):
         nws_high = nrow.get("nws_high_f")
         if nws_high is None:
             continue
-
-        trajectory_score = trajectory_agreement_score(city, cfg, d, nws_high)
 
         observed_high = None
         try:
@@ -876,17 +705,6 @@ def build_city_rows(city, cfg):
 
             edge = p_nws - ask
             score = opportunity_score(edge, temp_gap, hours_left)
-            sigma_source = "historical" if calibration.get(_lead_bucket(hours_left), {}).get("n", 0) >= 8 else "fallback"
-            sigma_samples = calibration.get(_lead_bucket(hours_left), {}).get("n", 0)
-            quality_score = bet_quality_score(
-                edge=edge,
-                p_nws=p_nws,
-                hours_left=hours_left,
-                temp_gap=temp_gap,
-                trajectory_score=trajectory_score,
-                sigma_source=sigma_source,
-                sigma_samples=sigma_samples,
-            )
             nws_support = nws_support_yes if side == "YES" else (not nws_support_yes if nws_support_yes is not None else None)
             qualifies = (
                 p_nws >= 0.55
@@ -926,9 +744,6 @@ def build_city_rows(city, cfg):
                 "hours_to_settlement": hours_left,
                 "kalshi_implied_temp_f": implied_temp,
                 "temperature_mismatch_f": temp_gap,
-                "trajectory_agreement_score": trajectory_score,
-                "bet_quality_score": quality_score,
-                "bet_quality_label": bet_quality_label(quality_score),
                 "opportunity_score": score,
                 # GFS fields are display-only from here down.
                 "ensemble_median_f": ensemble_median,
@@ -1360,14 +1175,22 @@ def latest_projection_chart(snapshot_df, observed_df, previous_observed_df, tz_n
     ).configure_view(strokeWidth=0)
     return chart, latest_key
 
-def max_projection_history_chart(snapshot_df, tz_name):
-    """One point per collector run: that run's predicted maximum for the selected day."""
+def max_projection_history_chart(snapshot_df, tz_name, target_date):
+    """One point per collector run: that run's predicted maximum for the selected contract day."""
     if snapshot_df.empty:
         return None, pd.DataFrame()
 
     tz = ZoneInfo(tz_name)
+    work = snapshot_df.copy()
+    # Snapshot rows can include forecast hours from neighboring days. Restrict the
+    # daily-high calculation to forecast-valid hours on the selected contract date.
+    work["valid_local"] = work["valid_at"].dt.tz_convert(tz)
+    work = work[work["valid_local"].dt.date == target_date].copy()
+    if work.empty:
+        return None, pd.DataFrame()
+
     history = (
-        snapshot_df.groupby("snapshot_key", as_index=False)["temp_f"]
+        work.groupby("snapshot_key", as_index=False)["temp_f"]
         .max()
         .rename(columns={"snapshot_key": "snapshot_time", "temp_f": "predicted_high_f"})
         .sort_values("snapshot_time")
@@ -1450,13 +1273,8 @@ def render_bet_forecast(city, contract_date):
     latest_chart, latest_key = latest_projection_chart(
         snapshot_df, observed, previous_observed, cfg["tz"], contract_date
     )
-    history_chart, history = max_projection_history_chart(snapshot_df, cfg["tz"])
+    history_chart, history = max_projection_history_chart(snapshot_df, cfg["tz"], contract_date)
 
-    latest_high = None
-    if latest_key is not None:
-        latest_slice = snapshot_df[snapshot_df["snapshot_key"] == latest_key]
-        if not latest_slice.empty:
-            latest_high = latest_slice["temp_f"].max()
     observed_high = None if observed.empty else observed["temp_f"].max()
 
     st.markdown("<div class='section-kicker'>WEATHER FIGURES</div>", unsafe_allow_html=True)
@@ -1473,10 +1291,9 @@ def render_bet_forecast(city, contract_date):
     else:
         st.info("Forecast-history will appear as additional snapshots are collected.")
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Latest projected high", "—" if pd.isna(latest_high) else f"{latest_high:.0f}°F")
-    m2.metric("Observed high so far", "—" if observed_high is None or pd.isna(observed_high) else f"{observed_high:.0f}°F")
-    m3.metric("Stored snapshots", f"{history.shape[0]:,}")
+    m1, m2 = st.columns(2)
+    m1.metric("Observed high so far", "—" if observed_high is None or pd.isna(observed_high) else f"{observed_high:.0f}°F")
+    m2.metric("Stored contract-day snapshots", f"{history.shape[0]:,}")
 
 
 
@@ -1535,16 +1352,6 @@ div[data-testid="stVerticalBlock"] > div:has(> div[data-testid="stHorizontalBloc
 .bet-callout-label {font-size:.76rem; letter-spacing:.13em; color:#C8B8FF; font-weight:800; margin-bottom:.28rem;}
 .bet-callout-main {font-size:1.28rem; line-height:1.35; color:#FCFAFF; font-weight:760;}
 .bet-callout-sub {font-size:.96rem; color:#D6D0DF; margin-top:.28rem;}
-.quality-card {
-  margin:.55rem 0 .85rem; padding:1rem 1.05rem; border-radius:18px;
-  background:linear-gradient(135deg, rgba(125,231,242,.13), rgba(183,156,255,.13));
-  border:1px solid rgba(125,231,242,.34); box-shadow:0 12px 34px rgba(0,0,0,.16);
-}
-.quality-top {display:flex; align-items:flex-end; justify-content:space-between; gap:1rem;}
-.quality-label {font-size:.74rem; letter-spacing:.13em; color:#8CEAF2; font-weight:850;}
-.quality-value {font-size:2.25rem; line-height:1; color:#FCFAFF; font-weight:850;}
-.quality-grade {font-size:1rem; color:#C8B8FF; font-weight:800; text-align:right;}
-.quality-sub {font-size:.88rem; color:#D6D0DF; margin-top:.42rem; line-height:1.4;}
 .signal-strip {display:grid; grid-template-columns:1fr 1fr; gap:.65rem; margin:.7rem 0 .85rem;}
 .signal-tile {padding:.78rem .9rem; border-radius:16px; background:rgba(255,255,255,.045); border:1px solid rgba(188,168,255,.24); min-width:0;}
 .signal-label {font-size:.69rem; letter-spacing:.105em; text-transform:uppercase; color:#C8B8FF; font-weight:800; margin-bottom:.22rem;}
@@ -1591,8 +1398,8 @@ qualified = df[
 ].copy()
 
 qualified = qualified.sort_values(
-    ["bet_quality_score", "conservative_edge", "opportunity_score", "volume"],
-    ascending=[False, False, False, False],
+    ["opportunity_score", "conservative_edge", "volume"],
+    ascending=[False, False, False],
 ).head(top_n)
 
 if qualified.empty:
@@ -1603,7 +1410,7 @@ else:
 if not qualified.empty:
     bet_rows = [r for _, r in qualified.iterrows()]
     bet_labels = [
-        f"#{i} · {r['city']} · {r['side']} · {r['bet_quality_score']:.0f}/100"
+        f"#{i} · {r['city']} · {r['side']} · {r['ask']*100:.0f}¢"
         for i, r in enumerate(bet_rows, start=1)
     ]
     selected_label = st.radio(
@@ -1630,23 +1437,6 @@ if not qualified.empty:
         f"</div>",
         unsafe_allow_html=True,
     )
-    qscore = float(r.get("bet_quality_score", 0.0))
-    qlabel = r.get("bet_quality_label", bet_quality_label(qscore))
-    traj = float(r.get("trajectory_agreement_score", 0.5))
-    st.markdown(
-        f"<div class='quality-card'>"
-        f"<div class='quality-top'>"
-        f"<div><div class='quality-label'>BET QUALITY SCORE</div>"
-        f"<div class='quality-value'>{qscore:.0f}<span style='font-size:1rem;color:#BDB6C8'>/100</span></div></div>"
-        f"<div class='quality-grade'>{qlabel}</div>"
-        f"</div>"
-        f"<div class='quality-sub'>"
-        f"Edge {r['conservative_edge']*100:+.1f} pp · NWS chance {r['conservative_prob']*100:.1f}% · "
-        f"trajectory agreement {traj*100:.0f}%"
-        f"</div></div>",
-        unsafe_allow_html=True,
-    )
-
     st.link_button("Open this bet on Kalshi ↗", r["kalshi_event_url"], use_container_width=True)
     st.caption(f"Settlement location: **{r['station_hint']}**")
 
@@ -1730,10 +1520,9 @@ with st.expander("See rejected / conflicting contracts"):
         rejected["Kalshi implied"] = rejected["kalshi_implied_temp_f"].map(lambda x: "—" if x is None or pd.isna(x) else f"{x:.1f}°F")
         rejected["Temp mismatch"] = rejected["temperature_mismatch_f"].map(lambda x: "—" if x is None or pd.isna(x) else f"{x:+.1f}°F")
         rejected["Weather Edge"] = rejected["conservative_edge"].map(lambda x: f"{x*100:+.1f} pp")
-        rejected["Bet Quality"] = rejected["bet_quality_score"].map(lambda x: f"{x:.0f}/100")
         st.dataframe(
             rejected[
-                ["city", "date_label", "side", "market_subtitle", "Status", "NWS station forecast", "Observed high", "Kalshi implied", "Temp mismatch", "Price", "Weather Edge", "Bet Quality"]
+                ["city", "date_label", "side", "market_subtitle", "Status", "NWS station forecast", "Observed high", "Kalshi implied", "Temp mismatch", "Price", "Weather Edge"]
             ].rename(columns={
                 "city": "City",
                 "date_label": "Date",
