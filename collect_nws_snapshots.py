@@ -5,8 +5,25 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_SECRET = os.environ["SUPABASE_SECRET"]
+def _require_env(*names):
+    """Return the first non-empty environment variable from names."""
+    for name in names:
+        value = os.getenv(name)
+        if value and value.strip():
+            return value.strip()
+    raise RuntimeError(
+        "Missing required environment variable. Expected one of: "
+        + ", ".join(names)
+    )
+
+
+SUPABASE_URL = _require_env("SUPABASE_URL").rstrip("/")
+SUPABASE_KEY = _require_env(
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "SUPABASE_SECRET",
+    "SUPABASE_SECRET_KEY",
+    "SUPABASE_ANON_KEY",
+)
 
 NWS_HEADERS = {
     "User-Agent": "WeatherEdge/1.0 weather forecast snapshot collector",
@@ -15,7 +32,7 @@ NWS_HEADERS = {
 
 LOCATIONS = {
     "New York": {"lat": 40.78335, "lon": -73.96497, "tz": "America/New_York", "station_id": "KNYC"},
-    "Chicago": {"lat": 41.78417, "lon": -87.75528, "tz": "America/Chicago", "station_id": "KMDW"},
+    "Chicago": {"lat": 41.9742, "lon": -87.9073, "tz": "America/Chicago", "station_id": "KORD"},
     "Miami": {"lat": 25.7952, "lon": -80.3254, "tz": "America/New_York", "station_id": "KMIA"},
     "Los Angeles": {"lat": 33.93806, "lon": -118.38889, "tz": "America/Los_Angeles", "station_id": "KLAX"},
     "Denver": {"lat": 39.85, "lon": -104.66, "tz": "America/Denver", "station_id": "KDEN"},
@@ -91,8 +108,8 @@ def save_rows(rows):
         return
     url = f"{SUPABASE_URL}/rest/v1/weather_forecast_snapshots"
     headers = {
-        "apikey": SUPABASE_SECRET,
-        "Authorization": f"Bearer {SUPABASE_SECRET}",
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
         "Prefer": "return=minimal",
     }
@@ -104,6 +121,7 @@ def save_rows(rows):
 
 def main():
     total_rows = 0
+    failures = []
     for city, location in LOCATIONS.items():
         print(f"Collecting {city}...")
         try:
@@ -112,8 +130,17 @@ def main():
             total_rows += len(rows)
             print(f"Saved {len(rows)} rows for {city}")
         except Exception as exc:
+            failures.append((city, str(exc)))
             print(f"ERROR for {city}: {exc}")
+
     print(f"Finished. Saved {total_rows} total rows.")
+    if failures:
+        print(f"{len(failures)} location(s) failed:")
+        for city, message in failures:
+            print(f"  - {city}: {message}")
+
+    if total_rows == 0:
+        raise SystemExit("No forecast rows were saved; failing the workflow.")
 
 if __name__ == "__main__":
     main()
